@@ -1,0 +1,28 @@
+# CMake / VS / Ninja
+build/
+out/
+CMakeCache.txt
+CMakeFiles/
+Testing/
+*.ninja
+.ninja_deps
+.ninja_log
+compile_commands.json
+
+# Visual Studio
+.vs/
+*.VC.db
+*.VC.VC.opendb
+Debug/
+Release/
+x64/
+ipch/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db

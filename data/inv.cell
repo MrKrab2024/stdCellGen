@@ -1,0 +1,8 @@
+# Simple inverter cell spec
+cell=INVX1
+rails=VDD,VSS
+pins=A,Y
+# PMOS pull-up
+trans=M1 type=PMOS W=0.50 L=0.05 G=A S=Y D=VDD B=VDD
+# NMOS pull-down
+trans=M2 type=NMOS W=0.30 L=0.05 G=A S=Y D=VSS B=VSS
