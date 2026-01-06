@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <numeric>
+#include <iomanip>
 
 using namespace stdcell;
 
@@ -31,6 +33,15 @@ static void ensure_dirs(const RunConfig& rc) {
     if (rc.place_out_dir.empty()) (void)std::filesystem::create_directories(default_dir("place")); else (void)std::filesystem::create_directories(rc.place_out_dir);
     if (rc.route_out_dir.empty()) (void)std::filesystem::create_directories(default_dir("route")); else (void)std::filesystem::create_directories(rc.route_out_dir);
 }
+
+struct MatchReportRow {
+    std::string cell;
+    bool used_fallback = false;
+    std::string fail_reason;
+    int group_count = 0;
+    int pair_count = 0;
+    int discrete_count = 0;
+};
 
 int main(int argc, char** argv) {
     if (argc < 3) { usage(); return 1; }
@@ -91,38 +102,93 @@ int main(int argc, char** argv) {
 
     MatchConfig mc = build_match_config(tr, rails_hint);
 
+    std::vector<MatchReportRow> report_rows;
+
+    // analysis dir for CSV/debug
+    std::string analysis_dir = (rc.out_dir.empty()? std::string("out") : rc.out_dir) + "/analysis";
+    std::string debug_dir = analysis_dir + "/debug";
+    std::error_code ec_mk;
+    std::filesystem::create_directories(analysis_dir, ec_mk);
+    std::filesystem::create_directories(debug_dir, ec_mk);
+
+    auto json_escape = [](const std::string& s){ std::string o; o.reserve(s.size()+2); for(char c: s){ if(c=='\\'||c=='"') o.push_back('\\'), o.push_back(c); else if(c=='\n') { o += "\\n"; } else o.push_back(c);} return o; };
+
     auto run_cell = [&](const std::string& cell){
         Netlist nl;
-        MatchResult mr;
         Placement pl;
 
         if (do_match) {
             nl = parse_spice_subckt(rc.library_spice, cell, rails_hint);
-            if (nl.devices.empty()) { std::cerr << "Warning: subckt parse failed for " << cell << ". Skipping.\n"; return; }
-            // structural matching per spec
-            mr = match_structural(nl, tr);
+            if (nl.devices.empty()) {
+                std::cerr << "Warning: subckt parse failed for " << cell << ". Skipping.\n"; return; }
+            // structural matching with status
+            StructuralMatchOutput mout = match_structural_pairs(nl, tr);
+            // summarize
+            MatchReportRow row; row.cell = cell; row.used_fallback = mout.used_fallback; row.fail_reason = mout.fail_reason; row.group_count = (int)mout.groups.size();
+            int pairs_sum = 0; for (const auto& g : mout.groups) pairs_sum += (int)g.pairs.size(); row.pair_count = pairs_sum; row.discrete_count = (int)mout.discrete.size();
+            report_rows.push_back(row);
+
+            // write per-cell debug JSON only for fails
+            if (mout.used_fallback) {
+                std::string dbg = debug_dir + "/" + cell + ".debug.json";
+                std::ofstream dj(dbg);
+                dj << "{\n  \"cell\": \"" << json_escape(cell) << "\",\n  \"used_fallback\": " << (mout.used_fallback?"true":"false") << ",\n  \"fail_reason\": \"" << json_escape(mout.fail_reason) << "\",\n  \"groups\": [\n";
+                for (size_t gi=0; gi<mout.groups.size(); ++gi) {
+                    const auto& g = mout.groups[gi];
+                    dj << "    {\"level\": " << g.level << ", \"pairs\": [\n";
+                    for (size_t pi=0; pi<g.pairs.size(); ++pi) {
+                        const auto& p = g.pairs[pi];
+                        dj << "      {\"pmos\":{\"id\":\"" << json_escape(p.pmos.id) << "\",\"g\":\"" << json_escape(p.pmos.g) << "\",\"s\":\"" << json_escape(p.pmos.s) << "\",\"d\":\"" << json_escape(p.pmos.d) << "\"},"
+                           << "\"nmos\":{\"id\":\"" << json_escape(p.nmos.id) << "\",\"g\":\"" << json_escape(p.nmos.g) << "\",\"s\":\"" << json_escape(p.nmos.s) << "\",\"d\":\"" << json_escape(p.nmos.d) << "\"}}";
+                        if (pi+1 != g.pairs.size()) dj << ",";
+                        dj << "\n";
+                    }
+                    dj << "    ]}";
+                    if (gi+1 != mout.groups.size()) dj << ",";
+                    dj << "\n";
+                }
+                dj << "  ],\n  \"discrete\": [\n";
+                for (size_t di=0; di<mout.discrete.size(); ++di) {
+                    const auto& m = mout.discrete[di];
+                    dj << "    {\"type\":\"" << (m.type==TransType::PMOS?"PMOS":"NMOS") << "\",\"id\":\"" << json_escape(m.id) << "\",\"g\":\"" << json_escape(m.g) << "\",\"s\":\"" << json_escape(m.s) << "\",\"d\":\"" << json_escape(m.d) << "\"}";
+                    if (di+1 != mout.discrete.size()) dj << ",";
+                    dj << "\n";
+                }
+                dj << "  ]\n}\n";
+            }
+
+            // convert to legacy for downstream
+            MatchResult mr = pairs_to_match_result(mout);
             std::string mpath = match_path_for(cell);
             write_match_json(mpath, mr);
         } else if (do_place || do_route) {
-            // load match
-            std::string mpath = (!rc.single_cell.empty() && !rc.match_file.empty()) ? rc.match_file : match_path_for(cell);
-            if (!read_match_json(mpath, mr)) { std::cerr << "Error: cannot read match json: " << mpath << "\n"; return; }
+            // When not matching, we still need nets/rails at least for route
+            nl.cell_name = cell; nl.rails = rails_hint;
         }
 
+        // Place stage
         if (do_place) {
-            if (nl.devices.empty()) { nl.cell_name = cell; nl.rails = rails_hint; }
+            MatchResult mr;
+            if (!do_match) {
+                std::string minpath = match_path_for(cell);
+                if (!read_match_json(minpath, mr)) { std::cerr << "Error: cannot read match json: " << minpath << "\n"; return; }
+            } else {
+                std::string minpath = match_path_for(cell);
+                read_match_json(minpath, mr);
+            }
             std::unique_ptr<IPlacer> placer = rc.use_rl ? make_rl_adapter_placer("python/rl_placer") : make_heuristic_placer();
             pl = placer->place(mr, tr, nl);
             std::string ppath = place_path_for(cell);
             write_placement_json(ppath, pl);
         } else if (do_route) {
-            std::string ppath = (!rc.single_cell.empty() && !rc.place_file.empty()) ? rc.place_file : place_path_for(cell);
+            std::string ppath = place_path_for(cell);
             if (!read_placement_json(ppath, pl)) { std::cerr << "Error: cannot read placement json: " << ppath << "\n"; return; }
         }
 
+        // Route stage
         if (do_route) {
             if (nl.cell_name.empty()) { nl.cell_name = cell; nl.rails = rails_hint; }
-            Routed routed = route_simple(mr, pl, tr, nl);
+            Routed routed = route_simple(MatchResult{}, pl, tr, nl);
             std::string outdir = (rc.route_out_dir.empty()? std::string("out/route") : rc.route_out_dir);
             std::string json_out = outdir + "/" + cell + ".layout.json";
             std::string txt_out = outdir + "/" + cell + ".layout.txt";
@@ -134,5 +200,34 @@ int main(int argc, char** argv) {
 
     if (cells.empty()) { std::cerr << "No cells specified to run.\n"; return 10; }
     for (const auto& cell : cells) run_cell(cell);
+
+    // Print match summary if we did match
+    if (do_match && !report_rows.empty()) {
+        int total = (int)report_rows.size();
+        int fallback_cnt = 0; for (auto& r : report_rows) if (r.used_fallback) ++fallback_cnt;
+        std::cout << "\nMatch Summary:" << std::endl;
+        std::cout << "Total cells: " << total << ", Fallback: " << fallback_cnt
+                  << " (" << std::fixed << std::setprecision(1) << (100.0 * fallback_cnt / std::max(1,total)) << "%)" << std::endl;
+        std::cout << "Details:" << std::endl;
+        for (const auto& r : report_rows) {
+            std::cout << "- " << r.cell << ": " << (r.used_fallback ? "FAIL" : "OK")
+                      << ", groups=" << r.group_count << ", pairs=" << r.pair_count << ", discrete=" << r.discrete_count;
+            if (r.used_fallback && !r.fail_reason.empty()) std::cout << ", reason=" << r.fail_reason;
+            std::cout << std::endl;
+        }
+        // Write CSV
+        std::string csv_path = analysis_dir + "/asap7_match_summary.csv";
+        std::ofstream csv(csv_path);
+        csv << "cell,status,groups,pairs,discrete,reason\n";
+        for (const auto& r : report_rows) {
+            std::string status = r.used_fallback ? "FAIL" : "OK";
+            // Quote reason and escape quotes
+            std::string reason = r.fail_reason; for (char& c : reason) if (c=='"') c='\'';
+            csv << r.cell << "," << status << "," << r.group_count << "," << r.pair_count << "," << r.discrete_count << ",\"" << reason << "\"\n";
+        }
+        std::cout << "CSV summary: " << csv_path << std::endl;
+        std::cout << "Debug JSON (fails): " << debug_dir << std::endl;
+    }
+
     return 0;
 }

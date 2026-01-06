@@ -36,15 +36,15 @@ struct Pair {
 };
 
 struct PairGroup {
-    MergeKind kind = MergeKind::Parallel; // group structural kind
-    int level = 0;                        // matched level
-    std::vector<Pair> pairs;              // ordered pairs; for Series, order fixed except flip; for Parallel, order free
+    int level = 0;                 // matched level
+    std::vector<Pair> pairs;       // ordered pairs
 };
 
 struct StructuralMatchOutput {
     std::vector<PairGroup> groups;   // matched groups
     std::vector<PairMos> discrete;   // unmatched level-0 devices
     bool used_fallback = false;      // true if structural matching failed at non-leaf level
+    std::string fail_reason;         // description when used_fallback
 };
 
 // Build structural groups and produce pair groups and discrete devices per spec.
