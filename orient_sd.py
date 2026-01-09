@@ -654,7 +654,12 @@ def process_cell(cell: Cell, vdd: str, vss: str) -> Dict[str, OrientationResult]
 
     shared = find_shared_ds_nets(p_devs, n_devs, exclude=power)
 
-    p_groups, _, p_merge_notes = build_series_groups()\n    n_groups, _, n_merge_notes = build_series_groups()\n\n    # Skip TG-like groups (both ends are middle nets)\n    p_groups, p_tg_notes = filter_transmission_groups(p_groups, power, shared)\n    n_groups, n_tg_notes = filter_transmission_groups(n_groups, power, shared)
+    p_groups, _, p_merge_notes = build_series_groups(p_devs, power, shared)
+    n_groups, _, n_merge_notes = build_series_groups(n_devs, power, shared)
+
+    # Skip TG-like groups (both ends are middle nets)
+    p_groups, p_tg_notes = filter_transmission_groups(p_groups, power, shared)
+    n_groups, n_tg_notes = filter_transmission_groups(n_groups, power, shared)
 
     p_res = orient_by_components(p_groups, p_devs, start_power_net=vdd, shared_nets=shared, subckt=cell.name)
     n_res = orient_by_components(n_groups, n_devs, start_power_net=vss, shared_nets=shared, subckt=cell.name)
@@ -662,7 +667,10 @@ def process_cell(cell: Cell, vdd: str, vss: str) -> Dict[str, OrientationResult]
     # Attach shared nets and merge notes for reporting
     p_res.shared_nets = set(shared)
     n_res.shared_nets = set(shared)
-    p_res.notes.extend(p_merge_notes)\n    n_res.notes.extend(n_merge_notes)\n    p_res.notes.extend(p_tg_notes)\n    n_res.notes.extend(n_tg_notes)
+    p_res.notes.extend(p_merge_notes)
+    n_res.notes.extend(n_merge_notes)
+    p_res.notes.extend(p_tg_notes)
+    n_res.notes.extend(n_tg_notes)
 
     return {"pmos": p_res, "nmos": n_res}
 
@@ -679,7 +687,9 @@ def rewrite_spice(lines: List[str],
         for typ in ("pmos", "nmos"):
             dev_orient.update(res_pair[typ].dev_to_oriented_ds)
 
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
     with open(out_path, "w", encoding="utf-8") as f:
         cur_subckt: Optional[str] = None
@@ -733,7 +743,9 @@ def write_report(results: Dict[str, Dict[str, OrientationResult]], report_path: 
                 "ambiguous_devices": r.ambiguous_devices,
             }
         payload[cname] = entry
-    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    report_dir = os.path.dirname(report_path)
+    if report_dir:
+        os.makedirs(report_dir, exist_ok=True)
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
@@ -749,7 +761,9 @@ def write_log(results: Dict[str, Dict[str, OrientationResult]], cells: Dict[str,
             p_notes = "; ".join(res_pair["pmos"].notes)
             n_notes = "; ".join(res_pair["nmos"].notes)
             skipped.append((cname, p_notes or n_notes or "no orientation applied"))
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    log_dir = os.path.dirname(log_path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
     with open(log_path, "w", encoding="utf-8") as f:
         f.write("[orient_sd] processed cells\n")
         for cname, o, a in processed:
