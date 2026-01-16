@@ -40,11 +40,32 @@ struct PairGroup {
     std::vector<Pair> pairs;       // ordered pairs
 };
 
+
+
+// Debug dump for failed structural matching
+struct GroupDump {
+    int level = 0;
+    MergeKind kind = MergeKind::Leaf;
+    std::string src_net;
+    std::string dst_net;
+    std::vector<std::string> trans_ids; // leaf devices inside this group
+    std::vector<GroupDump> children;    // recursive children
+};
+
+struct FailureDump {
+    std::string reason;  // reason string at failure point
+    int at_level = -1;   // level where failure happened
+    GroupDump left;      // PMOS-side snapshot
+    GroupDump right;     // NMOS-side snapshot
+};
+
 struct StructuralMatchOutput {
     std::vector<PairGroup> groups;   // matched groups
     std::vector<PairMos> discrete;   // unmatched level-0 devices
     bool used_fallback = false;      // true if structural matching failed at non-leaf level
     std::string fail_reason;         // description when used_fallback
+
+    std::vector<FailureDump> failures; // detailed failure snapshots
 };
 
 // Build structural groups and produce pair groups and discrete devices per spec.

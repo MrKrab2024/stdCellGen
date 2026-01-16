@@ -110,6 +110,8 @@ int main(int argc, char** argv) {
     std::error_code ec_mk;
     std::filesystem::create_directories(analysis_dir, ec_mk);
     std::filesystem::create_directories(debug_dir, ec_mk);
+    std::string pairs_dir = analysis_dir + "/pairs";
+    std::filesystem::create_directories(pairs_dir, ec_mk);
 
     auto json_escape = [](const std::string& s){ std::string o; o.reserve(s.size()+2); for(char c: s){ if(c=='\\'||c=='"') o.push_back('\\'), o.push_back(c); else if(c=='\n') { o += "\\n"; } else o.push_back(c);} return o; };
 
@@ -129,8 +131,8 @@ int main(int argc, char** argv) {
             report_rows.push_back(row);
 
             // write per-cell debug JSON only for fails
-            if (mout.used_fallback) {
-                std::string dbg = debug_dir + "/" + cell + ".debug.json";
+            {
+                std::string dbg = pairs_dir + "/" + cell + ".pairs.json";
                 std::ofstream dj(dbg);
                 dj << "{\n  \"cell\": \"" << json_escape(cell) << "\",\n  \"used_fallback\": " << (mout.used_fallback?"true":"false") << ",\n  \"fail_reason\": \"" << json_escape(mout.fail_reason) << "\",\n  \"groups\": [\n";
                 for (size_t gi=0; gi<mout.groups.size(); ++gi) {

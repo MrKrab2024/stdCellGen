@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # MIT License
 # Source/Drain orientation preprocessor for SPICE std-cell decks.
 
@@ -56,6 +56,11 @@ class OrientationResult:
     shared_nets: Set[str] = field(default_factory=set)
     notes: List[str] = field(default_factory=list)
     ambiguous_devices: List[Dict[str, str]] = field(default_factory=list)
+    skipped_tg_devices: List[Dict[str, str]] = field(default_factory=list)
+    debug_groups_pre: List[dict] = field(default_factory=list)
+    debug_groups_post: List[dict] = field(default_factory=list)
+    oriented_group_dirs: List[dict] = field(default_factory=list)
+    components: List[dict] = field(default_factory=list)
 
 # -----------------------------
 # SPICE parsing
@@ -358,108 +363,147 @@ def split_components(groups: List[Group]) -> List[Dict]:
 # Transmission gate filter (skip groups whose both ends are middle nets)
 # -----------------------------
 
-def filter_transmission_groups(groups: List[Group], power_nets: Set[str], shared_nets: Set[str]) -> Tuple[List[Group], List[str]]:
+
+def filter_transmission_groups(groups: List[Group], devs: List[Device], power_nets: Set[str], shared_nets: Set[str], skip_pairs: Optional[Set[frozenset]] = None) -> Tuple[List[Group], List[str], List[Dict[str, str]]]:
     notes: List[str] = []
     filtered: List[Group] = []
+    skipped: List[Dict[str, str]] = []
+    if skip_pairs is None:
+        skip_pairs = set()
     new_gid = 0
     for g in groups:
         a, b = g.ext_nets
-        a_mid = (a not in power_nets) and (a not in shared_nets)
-        b_mid = (b not in power_nets) and (b not in shared_nets)
-        if a_mid and b_mid:
-            notes.append(f"skip_tg_group gid={g.id} ends=({a},{b}) devs={len(g.dev_ids)}")
+        if (a in shared_nets) and (b in shared_nets) and (frozenset((a, b)) in skip_pairs):
+            notes.append('skip_tg_group gid={} ends=({}, {}) devs={}'.format(g.id, a, b, len(g.dev_ids)))
+            for i in g.dev_ids:
+                d = devs[i]
+                skipped.append({
+                    'device': d.name,
+                    'group': str(g.id),
+                    'ends': '{}--{}'.format(a, b),
+                    'reason': 'transmission_gate_group'
+                })
             continue
         g.id = new_gid
         filtered.append(g)
         new_gid += 1
-    return filtered, notes
+    return filtered, notes, skipped
+
 # -----------------------------
 # Orientation helpers
 # -----------------------------
+
 
 def orient_chain_devices_in_group(group: Group,
                                   devs: List[Device],
                                   src_net: str,
                                   dst_net: str) -> Dict[str, Tuple[str, str]]:
+    """
+    Orient devices inside a series/parallel group.
+    - If group.order exists (pure series), walk order from src_net to dst_net.
+    - If order is empty (parallel-merged chains), enumerate simple device-paths
+      from src_net to dst_net within this group, and orient each path along src->dst.
+    Returns: { devname: (newD, newS) }
+    """
     oriented: Dict[str, Tuple[str, str]] = {}
-    if not group.order:
-        # Fallback: orient any device that touches src_net and dst_net; otherwise greedy walk.
-        for i in group.dev_ids:
+
+    # Helper: set orientation for a single step u->v over device index i
+    def set_step(i: int, u: str, v: str):
+        d = devs[i]
+        # newS should be u, newD should be v
+        newS, newD = u, v
+        oriented[d.name] = (newD, newS)
+
+    # Pure series with known device order
+    if group.order:
+        order = list(group.order)
+        # Ensure first touches src_net; otherwise reverse
+        def touches(i: int, net: str) -> bool:
+            dd = devs[i]
+            return (dd.d == net) or (dd.s == net)
+        if order and not touches(order[0], src_net):
+            order = list(reversed(order))
+        cur = src_net
+        for i in order:
             d = devs[i]
-            ends = {d.d, d.s}
-            if src_net in ends and dst_net in ends:
-                if d.s == src_net:
-                    newS, newD = d.s, d.d
-                elif d.d == src_net:
-                    newS, newD = d.d, d.s
+            # Determine the other end
+            if d.d == cur:
+                nxt = d.s
+            elif d.s == cur:
+                nxt = d.d
+            else:
+                # If the device does not touch current net, try aligning to dst
+                if d.d == dst_net:
+                    nxt = d.s
+                    cur = d.d
                 else:
-                    newS, newD = d.s, d.d
-                oriented[d.name] = (newD, newS)
-        covered = {name for name in oriented.keys()}
-        net_to_ids: Dict[str, List[int]] = defaultdict(list)
-        for i in group.dev_ids:
-            if devs[i].name in covered:
-                continue
-            d = devs[i]
-            net_to_ids[d.d].append(i)
-            net_to_ids[d.s].append(i)
-        remaining = [i for i in group.dev_ids if devs[i].name not in covered]
-        current_net = src_net
-        while remaining:
-            cand = [i for i in remaining if devs[i].d == current_net or devs[i].s == current_net]
-            if not cand:
-                i = remaining[0]
-            else:
-                i = cand[0]
-            d = devs[i]
-            if d.d == current_net:
-                newD, newS = d.s, d.d
-                current_net = d.s
-            else:
-                newD, newS = d.d, d.s
-                current_net = d.d
-            oriented[d.name] = (newD, newS)
-            remaining.remove(i)
+                    nxt = d.d
+                    cur = d.s
+            set_step(i, cur, nxt)
+            cur = nxt
         return oriented
 
-    order = group.order
-    def touches(i: int, net: str) -> bool:
-        dd = devs[i]
-        return dd.d == net or dd.s == net
-    if order and not touches(order[0], src_net):
-        order = list(reversed(order))
-
-    current_net = src_net
-    for i in order:
+    # Parallel-merged chains (order empty): enumerate device-simple paths from src to dst
+    devset: Set[int] = set(group.dev_ids)
+    # Build adjacency: net -> list of (device index, other net)
+    net_to_edges: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
+    for i in group.dev_ids:
         d = devs[i]
-        if d.d == current_net:
-            newD, newS = d.s, d.d
-            current_net = d.s
-        elif d.s == current_net:
-            newD, newS = d.d, d.s
-            current_net = d.d
-        else:
-            if d.d == dst_net:
-                newD, newS = d.s, d.d
-                current_net = d.s
+        net_to_edges[d.d].append((i, d.s))
+        net_to_edges[d.s].append((i, d.d))
+
+    used: Set[int] = set()  # devices already oriented
+
+    def dfs(u: str, visited_devs: Set[int], path: List[Tuple[int, str, str]]):
+        # u: current net; path: list of (dev_index, from_net, to_net)
+        if u == dst_net:
+            # Orient this path (skip devices already done)
+            for i, a, b in path:
+                if i in used:
+                    continue
+                set_step(i, a, b)
+                used.add(i)
+            return True
+        progressed = False
+        for (i, v) in net_to_edges.get(u, []):
+            if i in visited_devs or i in used:
+                continue
+            visited_devs.add(i)
+            path.append((i, u, v))
+            if dfs(v, visited_devs, path):
+                progressed = True
+            path.pop()
+            visited_devs.remove(i)
+        return progressed
+
+    # Try to cover all devices by repeatedly finding disjoint paths src->dst
+    # Prefer starting from src_net
+    while True:
+        before = len(used)
+        dfs(src_net, set(), [])
+        if len(used) == before:
+            break
+
+    # Any leftover devices (should not happen in clean parallel chains), attempt local fix:
+    # orient them towards whichever endpoint they touch (src preferred)
+    if len(used) < len(devset):
+        for i in group.dev_ids:
+            if i in used:
+                continue
+            d = devs[i]
+            if d.d == src_net or d.s == src_net:
+                other = d.s if d.d == src_net else d.d
+                set_step(i, src_net, other)
+            elif d.d == dst_net or d.s == dst_net:
+                other = d.s if d.d == dst_net else d.d
+                set_step(i, other, dst_net)
             else:
-                newD, newS = d.d, d.s
-                current_net = d.d
-        oriented[d.name] = (newD, newS)
+                # Fallback: arbitrary but stable
+                set_step(i, d.s, d.d)
+            used.add(i)
+
     return oriented
 
-# -----------------------------
-# Path-aware BFS per component
-# -----------------------------
-
-def orient_component(groups: List[Group],
-                     devs: List[Device],
-                     comp_nets: Set[str],
-                     comp_group_ids: Set[int],
-                     start_net: str,
-                     shared_nets: Set[str],
-                     subckt: str,
-                     notes: List[str]) -> Tuple[Dict[int, Tuple[str, str]], Dict[str, Tuple[str, str]], List[List[str]], List[str]]:
     adj = build_group_graph(groups)
 
     # Unordered pair -> group ids, for propagating orientation to parallel ends regardless of order
@@ -540,6 +584,74 @@ def orient_component(groups: List[Group],
 # Per-side processing with ambiguous reasons
 # -----------------------------
 
+
+def orient_component(groups: List[Group],
+                     devs: List[Device],
+                     comp_nets: Set[str],
+                     comp_group_ids: Set[int],
+                     start_net: str,
+                     shared_nets: Set[str],
+                     subckt: str,
+                     notes: List[str]) -> Tuple[Dict[int, Tuple[str, str]], Dict[str, Tuple[str, str]], List[List[str]], List[str]]:
+    adj = build_group_graph(groups)
+
+    # Unordered pair -> group ids, for propagating orientation to parallel ends regardless of order
+    pair_to_gids: Dict[frozenset, List[int]] = defaultdict(list)
+    for gid in comp_group_ids:
+        a, b = groups[gid].ext_nets
+        pair_to_gids[frozenset((a, b))].append(gid)
+
+    def neighbors(u: str):
+        for gid, v in adj.get(u, []):
+            if gid in comp_group_ids and v in comp_nets:
+                yield gid, v
+
+    group_oriented: Dict[int, Tuple[str, str]] = {}
+    dev_oriented: Dict[str, Tuple[str, str]] = {}
+    sequences: List[List[str]] = []
+    conflicts: List[str] = []
+
+    def confirm_path(seq: List[str]):
+        # Confirm each edge along seq
+        for i in range(1, len(seq)):
+            a = seq[i-1]
+            b = seq[i]
+            desired = (a, b)
+            gids = pair_to_gids.get(frozenset((a, b)), [])
+            for g2 in gids:
+                prev = group_oriented.get(g2)
+                if prev and prev != desired:
+                    dev_names = [devs[i].name for i in groups[g2].dev_ids]
+                    conflicts.append(f"cell={subckt} group={g2} devs={dev_names} conflict: prev {prev} vs new {desired} on path {seq}")
+                    continue
+                if not prev:
+                    group_oriented[g2] = desired
+                    oriented = orient_chain_devices_in_group(groups[g2], devs, desired[0], desired[1])
+                    for dn, (newD, newS) in oriented.items():
+                        key = f"{subckt}:{dn}"
+                        dev_oriented[key] = (newD, newS)
+
+    # BFS of paths from start_net; only prune cycles on the current path
+    from collections import deque
+    q = deque()
+    q.append([start_net])
+    seen_paths = 0
+    while q:
+        path = q.popleft()
+        u = path[-1]
+        for gid, v in neighbors(u):
+            if v in path:
+                # cycle on current path; skip
+                continue
+            new_path = path + [v]
+            if v in shared_nets:
+                confirm_path(new_path)
+                sequences.append(new_path)
+            else:
+                q.append(new_path)
+            seen_paths += 1
+
+    return group_oriented, dev_oriented, sequences, conflicts
 def orient_by_components(groups: List[Group],
                          devs: List[Device],
                          start_power_net: str,
@@ -547,6 +659,8 @@ def orient_by_components(groups: List[Group],
                          subckt: str) -> OrientationResult:
     result = OrientationResult()
     comps = split_components(groups)
+    # record components summary for debug
+    result.components = [{"nets": sorted(list(c["nets"])), "group_ids": sorted(list(c["group_ids"]))} for c in comps]
 
     global_dev_oriented: Dict[str, Tuple[str, str]] = {}
     global_group_oriented: Dict[int, Tuple[str, str]] = {}
@@ -602,6 +716,8 @@ def orient_by_components(groups: List[Group],
             result.notes.append(c)
 
     result.dev_to_oriented_ds = global_dev_oriented
+    # oriented group directions for debug
+    result.oriented_group_dirs = [{"gid": gid, "from": ddir[0], "to": ddir[1]} for gid, ddir in global_group_oriented.items()]
     result.devs_oriented = len(global_dev_oriented)
     result.groups_oriented = len(global_group_oriented)
 
@@ -647,6 +763,20 @@ def orient_by_components(groups: List[Group],
 # Per-cell processing
 # -----------------------------
 
+def dump_groups(groups: List[Group], devs: List[Device]) -> List[dict]:
+    out = []
+    for g in groups:
+        a, b = g.ext_nets
+        dev_names = [devs[i].name for i in g.dev_ids]
+        order_names = [devs[i].name for i in g.order] if g.order else []
+        out.append({
+            'gid': g.id,
+            'ends': [a, b],
+            'devices': dev_names,
+            'order': order_names,
+        })
+    return out
+
 def process_cell(cell: Cell, vdd: str, vss: str) -> Dict[str, OrientationResult]:
     p_devs = [d for d in cell.devices if d.typ == "pmos"]
     n_devs = [d for d in cell.devices if d.typ == "nmos"]
@@ -654,15 +784,67 @@ def process_cell(cell: Cell, vdd: str, vss: str) -> Dict[str, OrientationResult]
 
     shared = find_shared_ds_nets(p_devs, n_devs, exclude=power)
 
-    p_groups, _, p_merge_notes = build_series_groups(p_devs, power, shared)
-    n_groups, _, n_merge_notes = build_series_groups(n_devs, power, shared)
+    p_groups, _, p_merge_notes = build_series_groups(p_devs, power_nets=power, shared_nets=shared)
+    n_groups, _, n_merge_notes = build_series_groups(n_devs, power_nets=power, shared_nets=shared)
 
-    # Skip TG-like groups (both ends are middle nets)
-    p_groups, p_tg_notes = filter_transmission_groups(p_groups, power, shared)
-    n_groups, n_tg_notes = filter_transmission_groups(n_groups, power, shared)
+    # debug: groups before TG filtering
+    p_debug_pre = dump_groups(p_groups, p_devs)
+    n_debug_pre = dump_groups(n_groups, n_devs)
+    # Compute end-pair intersection (unordered) across PMOS/NMOS; only these are true TGs
+    def __end_pairs(_groups):
+        _s = set()
+        for _g in _groups:
+            a, b = _g.ext_nets
+            if a and b:
+                _s.add(frozenset((a, b)))
+        return _s
+    skip_pairs = __end_pairs(p_groups) & __end_pairs(n_groups)
+    # Skip TG-like groups only for shared end-pairs present on both sides
 
+    p_groups, p_tg_notes, p_tg_skipped = filter_transmission_groups(p_groups, p_devs, power, shared, skip_pairs)
+    n_groups, n_tg_notes, n_tg_skipped = filter_transmission_groups(n_groups, n_devs, power, shared, skip_pairs)
     p_res = orient_by_components(p_groups, p_devs, start_power_net=vdd, shared_nets=shared, subckt=cell.name)
     n_res = orient_by_components(n_groups, n_devs, start_power_net=vss, shared_nets=shared, subckt=cell.name)
+    
+    # debug: groups after TG filtering
+    p_debug_post = dump_groups(p_groups, p_devs)
+    n_debug_post = dump_groups(n_groups, n_devs)
+    
+    # attach debug groups
+    p_res.debug_groups_pre = p_debug_pre
+    p_res.debug_groups_post = p_debug_post
+    n_res.debug_groups_pre = n_debug_pre
+    n_res.debug_groups_post = n_debug_post
+    
+    # Attach TG-skipped devices
+    p_res.skipped_tg_devices = p_tg_skipped
+    n_res.skipped_tg_devices = n_tg_skipped
+
+    def __candidate_names(groups, devs):
+        idxs = set()
+        for g in groups:
+            for i in g.dev_ids:
+                idxs.add(i)
+        return {devs[i].name for i in idxs}
+
+    p_candidates = __candidate_names(p_groups, p_devs)
+    n_candidates = __candidate_names(n_groups, n_devs)
+
+    def __oriented_names(res, subckt):
+        keys = set(res.dev_to_oriented_ds.keys())
+        names = set()
+        for k in keys:
+            parts = k.split(":", 1)
+            if len(parts) == 2 and parts[0] == subckt:
+                names.add(parts[1])
+        return names
+
+    p_oriented_names = __oriented_names(p_res, cell.name)
+    n_oriented_names = __oriented_names(n_res, cell.name)
+
+    p_res.devs_ambiguous = len(p_candidates - p_oriented_names)
+    n_res.devs_ambiguous = len(n_candidates - n_oriented_names)
+
 
     # Attach shared nets and merge notes for reporting
     p_res.shared_nets = set(shared)
@@ -741,6 +923,11 @@ def write_report(results: Dict[str, Dict[str, OrientationResult]], report_path: 
                 "sequences": r.sequences,
                 "notes": r.notes,
                 "ambiguous_devices": r.ambiguous_devices,
+                "skipped_tg_devices": r.skipped_tg_devices,
+                "series_groups_pre": r.debug_groups_pre,
+                "series_groups_post": r.debug_groups_post,
+                "oriented_group_dirs": r.oriented_group_dirs,
+                "components": r.components,
             }
         payload[cname] = entry
     report_dir = os.path.dirname(report_path)
@@ -756,7 +943,7 @@ def write_log(results: Dict[str, Dict[str, OrientationResult]], cells: Dict[str,
         oriented = res_pair["pmos"].devs_oriented + res_pair["nmos"].devs_oriented
         ambiguous = res_pair["pmos"].devs_ambiguous + res_pair["nmos"].devs_ambiguous
         if oriented > 0:
-            processed.append((cname, oriented, ambiguous))
+            processed.append((cname, oriented, ambiguous, (len(res_pair["pmos"].skipped_tg_devices) + len(res_pair["nmos"].skipped_tg_devices))))
         else:
             p_notes = "; ".join(res_pair["pmos"].notes)
             n_notes = "; ".join(res_pair["nmos"].notes)
@@ -766,8 +953,8 @@ def write_log(results: Dict[str, Dict[str, OrientationResult]], cells: Dict[str,
         os.makedirs(log_dir, exist_ok=True)
     with open(log_path, "w", encoding="utf-8") as f:
         f.write("[orient_sd] processed cells\n")
-        for cname, o, a in processed:
-            f.write(f"  - {cname}: oriented={o}, ambiguous={a}\n")
+        for cname, o, a, tgs in processed:
+            f.write(f"  - {cname}: oriented={o}, ambiguous={a}, tg_skipped={tgs}\n")
         f.write("\n[orient_sd] skipped cells\n")
         for cname, reason in skipped:
             f.write(f"  - {cname}: {reason}\n")
@@ -822,3 +1009,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

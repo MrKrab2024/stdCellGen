@@ -1,4 +1,4 @@
-#include "stdcell/structural_matcher.hpp"
+﻿#include "stdcell/structural_matcher.hpp"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -7,6 +7,7 @@
 #include <queue>
 #include <set>
 #include <limits>
+#include <sstream>
 
 namespace stdcell {
 
@@ -355,6 +356,15 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
     std::string vss = nl.rails.size()>1? nl.rails[1] : std::string("VSS");
     std::vector<int> pidx, nidx; for (int i=0;i<(int)nl.devices.size();++i){ if (nl.devices[i].type==TransType::PMOS) pidx.push_back(i); else nidx.push_back(i);} 
 
+    // Build inverter adjacency graph (g <-> y) using CMOS inverter pairs
+    std::unordered_map<std::string, std::vector<std::string>> inv_adj;
+    for (int ip : pidx) { for (int in : nidx) {
+        const auto& tp = nl.devices[ip]; const auto& tn = nl.devices[in];
+        if (tp.g != tn.g) continue;
+        auto other_net = [&](const std::string& a, const std::string& b, const std::string& rail){ return (a==rail)? b : ((b==rail)? a : std::string()); };
+        std::string yp = other_net(tp.s, tp.d, vdd); std::string yn = other_net(tn.s, tn.d, vss);
+        if (!yp.empty() && yp == yn && !is_rail(yp)) { inv_adj[tp.g].push_back(yp); inv_adj[yp].push_back(tp.g); }
+    } }
     // Inverters
     for (int ip : pidx) if (!used[ip]) {
         for (int in : nidx) if (!used[in]) {
@@ -368,7 +378,7 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
             }
         }
     }
-    // Transmission-gate: PMOS+NMOS share same two non-rail nets (S/D swapped allowed); gate relation not required
+// Transmission-gate: PMOS+NMOS share same two non-rail nets (S/D swapped allowed); gate relation not required
     for (int ip : pidx) if (!used[ip]) {
         for (int in : nidx) if (!used[in]) {
             const auto& tp = nl.devices[ip]; const auto& tn = nl.devices[in];
@@ -379,7 +389,9 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
             gpg.pairs.push_back(pr); out.groups.push_back(std::move(gpg));
             used[ip]=used[in]=true; break;
         }
+
     }
+
 
     // 1) Build D/S connectivity (ignore rails) on remaining devices; split into components
     std::unordered_map<std::string, std::vector<int>> net2devs;
@@ -403,6 +415,67 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
     // 2) For each component, build P/N group trees and recursively match
     for (auto& comp : comps) {
         std::unordered_set<int> allow(comp.begin(), comp.end());
+        // Component-local TG extraction using inv_adj (complementary gates) and identical undirected S/D ends
+        // Component-local single-drain TG extraction on shared DS nets (exclude rails), using inv_adj for gate complementarity
+        auto is_compl = [&](const std::string& a, const std::string& b)->bool {
+            if (a==b) return false;
+            std::queue<std::pair<std::string,int>> q; std::unordered_map<std::string,int> seen;
+            q.push({a,0}); seen[a]=0;
+            while(!q.empty()){
+                auto cur=q.front(); q.pop(); auto u=cur.first; int par=cur.second;
+                auto it = inv_adj.find(u); if (it==inv_adj.end()) continue;
+                for (const auto& v : it->second) {
+                    int np = par ^ 1;
+                    if (v==b && (np & 1)) return true;
+                    auto it2 = seen.find(v);
+                    if (it2==seen.end()) { seen[v]=np; q.push({v,np}); }
+                }
+            }
+            return false;
+        };
+        // collect shared DS nets within this component
+        std::unordered_set<std::string> p_ds, n_ds;
+        for (int idx : comp) if (!used[idx]) {
+            const auto& t = nl.devices[idx];
+            if (t.type==TransType::PMOS) { if (!is_rail(t.s)) p_ds.insert(t.s); if (!is_rail(t.d)) p_ds.insert(t.d); }
+            else                          { if (!is_rail(t.s)) n_ds.insert(t.s); if (!is_rail(t.d)) n_ds.insert(t.d); }
+        }
+        std::vector<std::string> shared;
+        for (const auto& x : p_ds) if (n_ds.count(x)) shared.push_back(x);
+        // build drain->device maps for unused devices
+        std::map<std::string,std::vector<int>> P_byD, N_byD;
+        for (int idx : comp) if (!used[idx]) {
+            const auto& t = nl.devices[idx];
+            if (is_rail(t.d)) continue;
+            if (t.type==TransType::PMOS) P_byD[t.d].push_back(idx); else N_byD[t.d].push_back(idx);
+        }
+        auto sort_by_id = [&](std::vector<int>& v){ std::sort(v.begin(), v.end(), [&](int a,int b){ return nl.devices[a].id < nl.devices[b].id; }); };
+        for (auto& kv : P_byD) sort_by_id(kv.second);
+        for (auto& kv : N_byD) sort_by_id(kv.second);
+        // greedy one-to-one pairing per shared drain net
+        for (const auto& mid : shared) {
+            auto pit = P_byD.find(mid), nit = N_byD.find(mid);
+            if (pit==P_byD.end() || nit==N_byD.end()) continue;
+            auto &PV = pit->second, &NV = nit->second;
+            std::vector<bool> usedN(NV.size(),false);
+            for (int ip : PV) {
+                if (used[ip]) continue;
+                const auto& tp = nl.devices[ip];
+                bool made=false;
+                for (size_t j=0;j<NV.size();++j) if (!usedN[j]) {
+                    int in = NV[j]; if (used[in]) continue;
+                    const auto& tn = nl.devices[in];
+                    if (!is_compl(tp.g, tn.g)) continue;
+                    PairGroup gpg; gpg.level=0; Pair pr; pr.x=0; pr.y=0;
+                    pr.pmos={tp.id,TransType::PMOS,tp.g,tp.s,tp.d,tp.b,false};
+                    pr.nmos={tn.id,TransType::NMOS,tn.g,tn.s,tn.d,tn.b,false};
+                    gpg.pairs.push_back(pr); out.groups.push_back(std::move(gpg));
+                    used[ip]=true; used[in]=true; usedN[j]=true; made=true; break;
+                }
+                (void)made;
+            }
+        }
+        allow.clear(); for (int idx : comp) if (!used[idx]) allow.insert(idx);
         Arena P, N; auto buildP = build_group_tree_subset(P, nl, TransType::PMOS, allow); auto buildN = build_group_tree_subset(N, nl, TransType::NMOS, allow);
         if (!buildP.ok || !buildN.ok || buildP.top<0 || buildN.top<0) {
             out.used_fallback = true; if (!buildP.ok) out.fail_reason=buildP.reason; else if (!buildN.ok) out.fail_reason=buildN.reason; else out.fail_reason="Empty P or N in component";
@@ -412,7 +485,15 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
         }
         std::vector<PairGroup> gvec;
         if (!rec_match_groups(P, buildP.top, N, buildN.top, by_id, gvec, out.discrete)) {
-            out.used_fallback = true; out.fail_reason = "Iterative match failed in component";
+            out.used_fallback = true; {
+            auto kindc = [](MergeKind k)->const char*{ switch(k){ case MergeKind::Leaf: return "Leaf"; case MergeKind::Series: return "Series"; case MergeKind::Parallel: return "Parallel"; } return "Leaf"; };
+            std::ostringstream ss; ss << "Iterative match failed in component"
+               << "; P_top={level=" << P.nodes[buildP.top].level << ",kind=" << kindc(P.nodes[buildP.top].kind)
+               << ",src=" << P.nodes[buildP.top].src_net << ",dst=" << P.nodes[buildP.top].dst_net << "}"
+               << ", N_top={level=" << N.nodes[buildN.top].level << ",kind=" << kindc(N.nodes[buildN.top].kind)
+               << ",src=" << N.nodes[buildN.top].src_net << ",dst=" << N.nodes[buildN.top].dst_net << "}";
+            out.fail_reason = ss.str(); }
+            
             collect_all_leaf_mos(P, buildP.top, TransType::PMOS, by_id, out.discrete);
             collect_all_leaf_mos(N, buildN.top, TransType::NMOS, by_id, out.discrete);
             continue;
