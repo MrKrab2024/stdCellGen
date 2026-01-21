@@ -1,4 +1,4 @@
-﻿#include "stdcell/structural_matcher.hpp"
+#include "stdcell/structural_matcher.hpp"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -16,7 +16,7 @@ struct Arena {
     int add(const MergeGroup& g){ nodes.push_back(g); return (int)nodes.size()-1; }
 };
 
-static bool is_rail(const std::string& n) {
+static bool is_rail_name(const std::string& n) {
     std::string u = n; for (auto& c : u) c = (char)toupper((unsigned char)c);
     return (u=="VDD"||u=="VSS"||u=="VCC"||u=="GND");
 }
@@ -93,7 +93,7 @@ static BuildResult build_group_tree_subset(Arena& ar, const Netlist& nl, TransTy
         std::map<int,int> next_map; std::map<int,int> prev_map;
         for (const auto& kv : usage) {
             const auto& u = kv.second; const std::string& net = kv.first;
-            if (u.as_dst.size() == 1 && u.as_src.size() == 1 && !is_rail(net)) {
+            if (u.as_dst.size() == 1 && u.as_src.size() == 1 && !is_rail_name(net)) {
                 int a = u.as_dst[0]; int b = u.as_src[0];
                 const auto& A = ar.nodes[a]; const auto& B = ar.nodes[b];
                 if (A.type == B.type && A.dst_net == net && B.src_net == net) {
@@ -158,13 +158,7 @@ static int count_gate_matches(const std::vector<std::string>& a_ids, const std::
     return score;
 }
 
-static void add_dummy(bool is_p, const std::vector<std::string>& ref_ids, const std::unordered_map<std::string, const Transistor*>& by_id,
-                      PairMos& out) {
-    out.id.clear(); out.is_dummy = true; out.type = (is_p?TransType::PMOS:TransType::NMOS);
-    if (ref_ids.empty()) { out.g = out.s = out.d = out.b = "DUMMY"; return; }
-    const auto* t = by_id.at(ref_ids[0]);
-    out.g = t->g; out.s = t->s; out.d = t->d; out.b = t->b;
-}
+static void add_dummy(bool /*is_p*/, const std::vector<std::string>& /*ref_ids*/, const std::unordered_map<std::string, const Transistor*>& /*by_id*/, DeviceRef& out) { out.id.clear(); out.is_dummy = true; }
 
 static PairGroup align_and_pair(int level,
                                 const std::vector<std::string>& p_ids,
@@ -213,19 +207,19 @@ static PairGroup align_and_pair(int level,
         if ((int)na.size()<M) na.insert(na.end(), M-(int)na.size(), std::string());
     }
     for (int i=0;i<M;++i) {
-        Pair pair; pair.x=0; pair.y=0;
-        if (!pa[i].empty()) { const auto* t = by_id.at(pa[i]); pair.pmos = {t->id, TransType::PMOS, t->g, t->s, t->d, t->b, false}; }
-        else { std::vector<std::string> ref; if (pad_left){ for (int k=i+1;k<M;++k) if (!pa[k].empty()){ ref.push_back(pa[k]); break; }} else { for (int k=i-1;k>=0;--k) if (!pa[k].empty()){ ref.push_back(pa[k]); break; }} add_dummy(true, ref, by_id, pair.pmos); }
-        if (!na[i].empty()) { const auto* t = by_id.at(na[i]); pair.nmos = {t->id, TransType::NMOS, t->g, t->s, t->d, t->b, false}; }
-        else { std::vector<std::string> ref; if (pad_left){ for (int k=i+1;k<M;++k) if (!na[k].empty()){ ref.push_back(na[k]); break; } } else { for (int k=i-1;k>=0;--k) if (!na[k].empty()){ ref.push_back(na[k]); break; } } add_dummy(false, ref, by_id, pair.nmos); }
+        Pair pair;
+        if (!pa[i].empty()) { const auto* t = by_id.at(pa[i]); pair.p = {t->id, false}; }
+        else { std::vector<std::string> ref; if (pad_left){ for (int k=i+1;k<M;++k) if (!pa[k].empty()){ ref.push_back(pa[k]); break; }} else { for (int k=i-1;k>=0;--k) if (!pa[k].empty()){ ref.push_back(pa[k]); break; }} add_dummy(true, ref, by_id, pair.p); }
+        if (!na[i].empty()) { const auto* t = by_id.at(na[i]); pair.n = {t->id, false}; }
+        else { std::vector<std::string> ref; if (pad_left){ for (int k=i+1;k<M;++k) if (!na[k].empty()){ ref.push_back(na[k]); break; } } else { for (int k=i-1;k>=0;--k) if (!na[k].empty()){ ref.push_back(na[k]); break; } } add_dummy(false, ref, by_id, pair.n); }
         pg.pairs.push_back(pair);
     }
     return pg;
 }
 
-static void collect_all_leaf_mos(const Arena& ar, int idx, TransType tp, const std::unordered_map<std::string, const Transistor*>& by_id, std::vector<PairMos>& out) {
+static void collect_all_leaf_mos(const Arena& ar, int idx, TransType tp, const std::unordered_map<std::string, const Transistor*>& by_id, std::vector<DeviceRef>& out) {
     std::vector<std::string> ids; collect_leaves_ids(ar, idx, ids);
-    for (auto& id : ids) { const auto* t = by_id.at(id); out.push_back({t->id, tp, t->g, t->s, t->d, t->b, false}); }
+    for (auto& id : ids) { const auto* t = by_id.at(id); DeviceRef r; r.id = t->id; r.is_dummy = false; out.push_back(r); }
 }
 
 // Hungarian algorithm for maximum weight assignment. Pads to square.
@@ -266,7 +260,7 @@ static std::vector<int> hungarian_max(const std::vector<std::vector<double>>& w)
 static bool rec_match_groups(const Arena& P, int p_idx, const Arena& N, int n_idx,
                              const std::unordered_map<std::string, const Transistor*>& by_id,
                              std::vector<PairGroup>& out_groups,
-                             std::vector<PairMos>& discrete) {
+                             std::vector<DeviceRef>& discrete) {
     const auto& PG = P.nodes[p_idx];
     const auto& NG = N.nodes[n_idx];
     if (PG.level != NG.level) return false;
@@ -320,14 +314,14 @@ static bool rec_match_groups(const Arena& P, int p_idx, const Arena& N, int n_id
         const auto& A = P.nodes[pch[i]];
         if (A.level == 0) {
             std::vector<std::string> ids; collect_leaves_ids(P, pch[i], ids);
-            for (auto& id : ids) { const auto* t = by_id.at(id); discrete.push_back({t->id, TransType::PMOS, t->g, t->s, t->d, t->b, false}); }
+            for (auto& id : ids) { const auto* t = by_id.at(id); discrete.push_back({t->id, false}); }
         } else return false;
     }
     for (int j=0;j<R;++j) if (!usedN[j]) {
         const auto& B = N.nodes[nch[j]];
         if (B.level == 0) {
             std::vector<std::string> ids; collect_leaves_ids(N, nch[j], ids);
-            for (auto& id : ids) { const auto* t = by_id.at(id); discrete.push_back({t->id, TransType::NMOS, t->g, t->s, t->d, t->b, false}); }
+            for (auto& id : ids) { const auto* t = by_id.at(id); discrete.push_back({t->id, false}); }
         } else return false;
     }
     return true;
@@ -336,8 +330,8 @@ static bool rec_match_groups(const Arena& P, int p_idx, const Arena& N, int n_id
 static bool detect_inverter_pair(const Transistor& p, const Transistor& n, const std::string& vdd, const std::string& vss, std::string& gate_out) {
     if (p.g != n.g) return false;
     auto other = [&](const std::string& a, const std::string& b, const std::string& rail){ return (a==rail)? b : ((b==rail)? a : std::string()); };
-    std::string y1 = other(p.s, p.d, vdd); if (y1.empty() || is_rail(y1)) return false;
-    std::string y2 = other(n.s, n.d, vss); if (y2.empty() || is_rail(y2)) return false;
+    std::string y1 = other(p.s, p.d, vdd); if (y1.empty() || is_rail_name(y1)) return false;
+    std::string y2 = other(n.s, n.d, vss); if (y2.empty() || is_rail_name(y2)) return false;
     if (y1 != y2) return false;
     gate_out = p.g; return true;
 }
@@ -352,27 +346,37 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
 
     // 0) Preprocess: detect inverter and transmission-gate pairs; emit PairGroup and mark used
     std::vector<bool> used(nl.devices.size(), false);
-    std::string vdd = nl.rails.size()>0? nl.rails[0] : std::string("VDD");
-    std::string vss = nl.rails.size()>1? nl.rails[1] : std::string("VSS");
+    // rails from Netlist no longer used; rely on alias sets in TechRules
+    
     std::vector<int> pidx, nidx; for (int i=0;i<(int)nl.devices.size();++i){ if (nl.devices[i].type==TransType::PMOS) pidx.push_back(i); else nidx.push_back(i);} 
 
+    // Build VDD/VSS alias sets from TechRules CSV (uppercased); fallback to VDD/VSS and add VCC/GND
+    auto to_upper = [](std::string s){ for (auto& c : s) c = (char)std::toupper((unsigned char)c); return s; };
+    auto split_csv_alias = [](const std::string& s){ std::vector<std::string> out; std::stringstream ss(s); std::string it; while (std::getline(ss, it, ',')) { size_t b = it.find_first_not_of(" \t"); if (b==std::string::npos) continue; size_t e = it.find_last_not_of(" \t"); out.push_back(it.substr(b, e-b+1)); } return out; };
+    std::unordered_set<std::string> S_VDD, S_VSS;
+    { auto v = split_csv_alias(tr.vdd_aliases_csv); if (v.empty()) v.push_back("VDD"); for (auto& t : v) S_VDD.insert(to_upper(t)); S_VDD.insert("VCC"); }
+    { auto v = split_csv_alias(tr.vss_aliases_csv); if (v.empty()) v.push_back("VSS"); for (auto& t : v) S_VSS.insert(to_upper(t)); S_VSS.insert("GND"); }
+    auto is_rail_name = [&](const std::string& n){ auto u = to_upper(n); return S_VDD.count(u) || S_VSS.count(u); };
+    auto other_on_set = [&](const std::string& a, const std::string& b, const std::unordered_set<std::string>& S){ auto ua=to_upper(a), ub=to_upper(b); if (S.count(ua) && !S.count(ub)) return b; if (S.count(ub) && !S.count(ua)) return a; return std::string(); };
     // Build inverter adjacency graph (g <-> y) using CMOS inverter pairs
     std::unordered_map<std::string, std::vector<std::string>> inv_adj;
     for (int ip : pidx) { for (int in : nidx) {
         const auto& tp = nl.devices[ip]; const auto& tn = nl.devices[in];
         if (tp.g != tn.g) continue;
-        auto other_net = [&](const std::string& a, const std::string& b, const std::string& rail){ return (a==rail)? b : ((b==rail)? a : std::string()); };
-        std::string yp = other_net(tp.s, tp.d, vdd); std::string yn = other_net(tn.s, tn.d, vss);
-        if (!yp.empty() && yp == yn && !is_rail(yp)) { inv_adj[tp.g].push_back(yp); inv_adj[yp].push_back(tp.g); }
+        std::string yp = other_on_set(tp.s, tp.d, S_VDD); std::string yn = other_on_set(tn.s, tn.d, S_VSS);
+        if (!yp.empty() && yp == yn && !is_rail_name(yp)) { inv_adj[tp.g].push_back(yp); inv_adj[yp].push_back(tp.g); }
+        
     } }
     // Inverters
     for (int ip : pidx) if (!used[ip]) {
         for (int in : nidx) if (!used[in]) {
             std::string g;
-            if (detect_inverter_pair(nl.devices[ip], nl.devices[in], vdd, vss, g)) {
-                PairGroup gpg; gpg.level=0;
-                const auto& tp = nl.devices[ip]; const auto& tn = nl.devices[in];
-                Pair pr; pr.x=0; pr.y=0; pr.pmos={tp.id, TransType::PMOS, tp.g,tp.s,tp.d,tp.b,false}; pr.nmos={tn.id, TransType::NMOS, tn.g,tn.s,tn.d,tn.b,false};
+            // set-based inverter check using alias sets
+            const auto& tp = nl.devices[ip]; const auto& tn = nl.devices[in];
+            std::string yp2 = other_on_set(tp.s, tp.d, S_VDD); std::string yn2 = other_on_set(tn.s, tn.d, S_VSS);
+            if (tp.g == tn.g && !yp2.empty() && yp2 == yn2 && !is_rail_name(yp2)) {
+                PairGroup gpg; gpg.level = 0;
+                Pair pr; pr.p.id = tp.id; pr.p.is_dummy=false; pr.n.id = tn.id; pr.n.is_dummy=false;
                 gpg.pairs.push_back(pr); out.groups.push_back(std::move(gpg));
                 used[ip]=used[in]=true; break;
             }
@@ -383,9 +387,9 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
         for (int in : nidx) if (!used[in]) {
             const auto& tp = nl.devices[ip]; const auto& tn = nl.devices[in];
             if (!is_same_undirected_netpair(tp, tn)) continue;
-            if (is_rail(tp.s) || is_rail(tp.d)) continue;
+            if (is_rail_name(tp.s) || is_rail_name(tp.d)) continue;
             PairGroup gpg; gpg.level=0;
-            Pair pr; pr.x=0; pr.y=0; pr.pmos={tp.id, TransType::PMOS, tp.g,tp.s,tp.d,tp.b,false}; pr.nmos={tn.id, TransType::NMOS, tn.g,tn.s,tn.d,tn.b,false};
+            Pair pr; pr.p.id = tp.id; pr.p.is_dummy=false; pr.n.id = tn.id; pr.n.is_dummy=false;
             gpg.pairs.push_back(pr); out.groups.push_back(std::move(gpg));
             used[ip]=used[in]=true; break;
         }
@@ -396,7 +400,7 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
     // 1) Build D/S connectivity (ignore rails) on remaining devices; split into components
     std::unordered_map<std::string, std::vector<int>> net2devs;
     for (int i=0;i<(int)nl.devices.size();++i) if (!used[i]) {
-        const auto& t = nl.devices[i]; if (!is_rail(t.s)) net2devs[t.s].push_back(i); if (!is_rail(t.d)) net2devs[t.d].push_back(i);
+        const auto& t = nl.devices[i]; if (!is_rail_name(t.s)) net2devs[t.s].push_back(i); if (!is_rail_name(t.d)) net2devs[t.d].push_back(i);
     }
     std::vector<int> remIdx; for (int i=0;i<(int)nl.devices.size();++i) if (!used[i]) remIdx.push_back(i);
     std::vector<std::vector<int>> comps;
@@ -407,7 +411,7 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
             int u=q.front(); q.pop(); comp.push_back(u);
             const auto& t = nl.devices[u];
             auto expand = [&](const std::string& net){ auto it=net2devs.find(net); if(it==net2devs.end()) return; for(int v:it->second) if(!vis.count(v)){ vis.insert(v); q.push(v);} };
-            if (!is_rail(t.s)) expand(t.s); if (!is_rail(t.d)) expand(t.d);
+            if (!is_rail_name(t.s)) expand(t.s); if (!is_rail_name(t.d)) expand(t.d);
         }
         comps.push_back(std::move(comp));
     }
@@ -437,8 +441,8 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
         std::unordered_set<std::string> p_ds, n_ds;
         for (int idx : comp) if (!used[idx]) {
             const auto& t = nl.devices[idx];
-            if (t.type==TransType::PMOS) { if (!is_rail(t.s)) p_ds.insert(t.s); if (!is_rail(t.d)) p_ds.insert(t.d); }
-            else                          { if (!is_rail(t.s)) n_ds.insert(t.s); if (!is_rail(t.d)) n_ds.insert(t.d); }
+            if (t.type==TransType::PMOS) { if (!is_rail_name(t.s)) p_ds.insert(t.s); if (!is_rail_name(t.d)) p_ds.insert(t.d); }
+            else                          { if (!is_rail_name(t.s)) n_ds.insert(t.s); if (!is_rail_name(t.d)) n_ds.insert(t.d); }
         }
         std::vector<std::string> shared;
         for (const auto& x : p_ds) if (n_ds.count(x)) shared.push_back(x);
@@ -446,7 +450,7 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
         std::map<std::string,std::vector<int>> P_byD, N_byD;
         for (int idx : comp) if (!used[idx]) {
             const auto& t = nl.devices[idx];
-            if (is_rail(t.d)) continue;
+            if (is_rail_name(t.d)) continue;
             if (t.type==TransType::PMOS) P_byD[t.d].push_back(idx); else N_byD[t.d].push_back(idx);
         }
         auto sort_by_id = [&](std::vector<int>& v){ std::sort(v.begin(), v.end(), [&](int a,int b){ return nl.devices[a].id < nl.devices[b].id; }); };
@@ -466,9 +470,9 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
                     int in = NV[j]; if (used[in]) continue;
                     const auto& tn = nl.devices[in];
                     if (!is_compl(tp.g, tn.g)) continue;
-                    PairGroup gpg; gpg.level=0; Pair pr; pr.x=0; pr.y=0;
-                    pr.pmos={tp.id,TransType::PMOS,tp.g,tp.s,tp.d,tp.b,false};
-                    pr.nmos={tn.id,TransType::NMOS,tn.g,tn.s,tn.d,tn.b,false};
+                    PairGroup gpg; gpg.level=0; Pair pr;
+                    pr.p.id = tp.id; pr.p.is_dummy=false;
+                    pr.n.id = tn.id; pr.n.is_dummy=false;
                     gpg.pairs.push_back(pr); out.groups.push_back(std::move(gpg));
                     used[ip]=true; used[in]=true; usedN[j]=true; made=true; break;
                 }
@@ -504,28 +508,31 @@ StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules&
     return out;
 }
 
-MatchResult pairs_to_match_result(const StructuralMatchOutput& out) {
+MatchResult pairs_to_match_result(const StructuralMatchOutput& out, const Netlist& nl) {
     MatchResult mr;
     auto emit_pair = [&](const Pair& pair){
-        if (!pair.pmos.is_dummy && !pair.pmos.id.empty()) {
-            FoldedDevice fd; fd.base_id = pair.pmos.id; fd.fold_index = 0; fd.type = TransType::PMOS; fd.w_um = 0; fd.g=pair.pmos.g; fd.s=pair.pmos.s; fd.d=pair.pmos.d; fd.b=pair.pmos.b; mr.p_row.push_back(fd);
+        auto findT = [&](const std::string& id)->const Transistor*{
+            for (const auto& t : nl.devices) if (t.id == id) return &t; return nullptr; };
+        if (!pair.p.is_dummy && !pair.p.id.empty()) {
+            if (auto tp = findT(pair.p.id)) { FoldedDevice fd; fd.base_id = tp->id; fd.fold_index = 0; fd.type = TransType::PMOS; fd.w_um = 0; fd.g=tp->g; fd.s=tp->s; fd.d=tp->d; fd.b=tp->b; mr.p_row.push_back(fd); }
         }
-        if (!pair.nmos.is_dummy && !pair.nmos.id.empty()) {
-            FoldedDevice fd; fd.base_id = pair.nmos.id; fd.fold_index = 0; fd.type = TransType::NMOS; fd.w_um = 0; fd.g=pair.nmos.g; fd.s=pair.nmos.s; fd.d=pair.nmos.d; fd.b=pair.nmos.b; mr.n_row.push_back(fd);
+        if (!pair.n.is_dummy && !pair.n.id.empty()) {
+            if (auto tn = findT(pair.n.id)) { FoldedDevice fd; fd.base_id = tn->id; fd.fold_index = 0; fd.type = TransType::NMOS; fd.w_um = 0; fd.g=tn->g; fd.s=tn->s; fd.d=tn->d; fd.b=tn->b; mr.n_row.push_back(fd); }
         }
     };
     for (const auto& g : out.groups) for (const auto& p : g.pairs) emit_pair(p);
     for (const auto& m : out.discrete) {
         if (m.id.empty()) continue;
-        FoldedDevice fd; fd.base_id = m.id; fd.fold_index = 0; fd.type = m.type; fd.w_um = 0; fd.g=m.g; fd.s=m.s; fd.d=m.d; fd.b=m.b;
-        if (m.type == TransType::PMOS) mr.p_row.push_back(fd); else mr.n_row.push_back(fd);
+        const Transistor* tptr = nullptr; for (const auto& t : nl.devices) if (t.id == m.id) { tptr = &t; break; }
+        if (!tptr) continue;
+        FoldedDevice fd; fd.base_id = tptr->id; fd.fold_index = 0; fd.type = tptr->type; fd.w_um = 0; fd.g=tptr->g; fd.s=tptr->s; fd.d=tptr->d; fd.b=tptr->b;
+        if (tptr->type == TransType::PMOS) mr.p_row.push_back(fd); else mr.n_row.push_back(fd);
     }
     return mr;
 }
 
 MatchResult match_structural(const Netlist& nl, const TechRules& tr) {
-    auto out = match_structural_pairs(nl, tr);
-    return pairs_to_match_result(out);
+    auto out = match_structural_pairs(nl, tr);\n    return pairs_to_match_result(out, nl);
 }
 
 } // namespace stdcell

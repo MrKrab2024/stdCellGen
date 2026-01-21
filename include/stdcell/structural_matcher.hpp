@@ -20,27 +20,21 @@ struct MergeGroup {
     std::vector<int> children;          // indices in arena
 };
 
-// Pairing result types
-struct PairMos {
-    std::string id;     // empty if dummy
-    TransType type;     // PMOS/NMOS
-    std::string g, s, d, b;
-    bool is_dummy = false;
+// Unified device reference used by matcher outputs (no geometry, no net duplication)
+struct DeviceRef {
+    std::string id;       // refers to Netlist.devices[*].id
+    bool is_dummy = false; // true when padding pair columns
 };
 
 struct Pair {
-    PairMos pmos;
-    PairMos nmos;
-    int x = 0; // integer placement coords (to be filled later)
-    int y = 0; // y equal within a pair by construction
+    DeviceRef p; // PMOS id (or dummy)
+    DeviceRef n; // NMOS id (or dummy)
 };
 
 struct PairGroup {
     int level = 0;                 // matched level
     std::vector<Pair> pairs;       // ordered pairs
 };
-
-
 
 // Debug dump for failed structural matching
 struct GroupDump {
@@ -60,10 +54,10 @@ struct FailureDump {
 };
 
 struct StructuralMatchOutput {
-    std::vector<PairGroup> groups;   // matched groups
-    std::vector<PairMos> discrete;   // unmatched level-0 devices
-    bool used_fallback = false;      // true if structural matching failed at non-leaf level
-    std::string fail_reason;         // description when used_fallback
+    std::vector<PairGroup> groups;     // matched groups
+    std::vector<DeviceRef> discrete;   // unmatched level-0 devices (ids only)
+    bool used_fallback = false;        // true if structural matching failed at non-leaf level
+    std::string fail_reason;           // description when used_fallback
 
     std::vector<FailureDump> failures; // detailed failure snapshots
 };
@@ -71,8 +65,8 @@ struct StructuralMatchOutput {
 // Build structural groups and produce pair groups and discrete devices per spec.
 StructuralMatchOutput match_structural_pairs(const Netlist& nl, const TechRules& tr);
 
-// Convenience: convert pair groups into legacy MatchResult ordering for current placer/router pipeline.
-MatchResult pairs_to_match_result(const StructuralMatchOutput& out);
+// Convert pair groups into legacy MatchResult ordering for current placer/router pipeline.
+MatchResult pairs_to_match_result(const StructuralMatchOutput& out, const Netlist& nl);
 
 // Legacy API kept: returns MatchResult by delegating to pairs.
 MatchResult match_structural(const Netlist& nl, const TechRules& tr);
