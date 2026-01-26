@@ -61,9 +61,16 @@ Netlist parse_cell_spec(const std::string& path) {
         if (line.empty() || line[0] == '#') continue;
         if (line.rfind("cell=", 0) == 0) {
             nl.cell_name = trim(line.substr(5));
+        } else if (line.rfind("vdd=", 0) == 0) {
+            auto vals = split(trim(line.substr(4)), ',');
+            for (auto& s : vals) nl.vdd_nets.push_back(trim(s));
+        } else if (line.rfind("vss=", 0) == 0) {
+            auto vals = split(trim(line.substr(4)), ',');
+            for (auto& s : vals) nl.vss_nets.push_back(trim(s));
         } else if (line.rfind("rails=", 0) == 0) {
             auto vals = split(trim(line.substr(6)), ',');
-            for (auto& s : vals) nl.rails.push_back(trim(s));
+            if (!vals.empty()) nl.vdd_nets.push_back(trim(vals[0]));
+            if (vals.size() > 1) nl.vss_nets.push_back(trim(vals[1]));
         } else if (line.rfind("pins=", 0) == 0) {
             auto vals = split(trim(line.substr(5)), ',');
             for (auto& s : vals) nl.pins.push_back(trim(s));
@@ -91,7 +98,6 @@ Netlist parse_cell_spec(const std::string& path) {
     }
     return nl;
 }
-
 static double parse_metric_value_to_um(const std::string& v) {
     std::string s = trim(v);
     if (s.empty()) return 0.0;
@@ -101,8 +107,8 @@ static double parse_metric_value_to_um(const std::string& v) {
 }
 
 Netlist parse_spice_subckt(const std::string& lib_path, const std::string& subckt_name,
-                           const std::vector<std::string>& rails_hint) {
-    Netlist nl; nl.cell_name = subckt_name; nl.rails = rails_hint;
+                           const std::vector<std::string>& vdd_hint, const std::vector<std::string>& vss_hint) {
+    Netlist nl; nl.cell_name = subckt_name; nl.vdd_nets = vdd_hint; nl.vss_nets = vss_hint;
     std::ifstream f(lib_path);
     if (!f.good()) return nl;
     std::string line; bool in = false; std::vector<std::string> pins;
@@ -178,6 +184,8 @@ RunConfig parse_run_config(const std::string& path) {
         set_if("rails", rc.rails_csv);
         set_if("vdd_net", rc.vdd_net);
         set_if("vss_net", rc.vss_net);
+        set_if("pairs_bundle_in", rc.pairs_bundle_in);
+        set_if("pairs_bundle_out", rc.pairs_bundle_out);
         set_if("match_file", rc.match_file);
         set_if("place_file", rc.place_file);
         if (kl == "steps") {
@@ -191,7 +199,7 @@ RunConfig parse_run_config(const std::string& path) {
             std::string vl = tolower_str(v); rc.do_place = (vl == "1" || vl == "true" || vl == "yes");
         } else if (kl == "route" || kl == "do_route") {
             std::string vl = tolower_str(v); rc.do_route = (vl == "1" || vl == "true" || vl == "yes");
-        } else if (kl != "library_spice" && kl != "tech_cfg" && kl != "cells_list" && kl != "single_cell" && kl != "out_dir" && kl != "match_in_dir" && kl != "match_out_dir" && kl != "place_in_dir" && kl != "place_out_dir" && kl != "route_out_dir" && kl != "rails" && kl != "vdd_net" && kl != "vss_net" && kl != "match_file" && kl != "place_file") {
+        } else if (kl != "library_spice" && kl != "tech_cfg" && kl != "cells_list" && kl != "single_cell" && kl != "out_dir" && kl != "match_in_dir" && kl != "match_out_dir" && kl != "place_in_dir" && kl != "place_out_dir" && kl != "route_out_dir" && kl != "rails" && kl != "vdd_net" && kl != "vss_net" && kl != "match_file" && kl != "place_file" && kl != "pairs_bundle_in" && kl != "pairs_bundle_out") {
             rc.overrides[k] = v;
         }
     }
@@ -356,3 +364,8 @@ bool read_placement_json(const std::string& path, Placement& pl) {
 }
 
 } // namespace stdcell
+
+
+
+
+

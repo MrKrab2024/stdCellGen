@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+﻿cmake_minimum_required(VERSION 3.15)
 project(stdcellgen LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -16,6 +16,7 @@ add_library(stdcell
   src/io/io.cpp
   src/matcher/matcher.cpp;src/matcher/matchdata.cpp;src/matcher/structural_matcher.cpp
   src/placer/placer.cpp
+  src/placer/folding.cpp
   src/router/router.cpp
 )
 
@@ -27,3 +28,9 @@ target_link_libraries(stdcellgen PRIVATE stdcell)
 
 # Install rules (optional)
 install(TARGETS stdcellgen RUNTIME DESTINATION bin)
+
+
+add_executable(fold_dump apps/fold_dump.cpp)
+
+target_link_libraries(fold_dump PRIVATE stdcell)
+

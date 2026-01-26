@@ -1,4 +1,4 @@
-#include "stdcell/io.hpp"
+﻿#include "stdcell/io.hpp"
 #include "stdcell/matcher.hpp"
 #include "stdcell/matchdata.hpp"
 #include "stdcell/structural_matcher.hpp"
@@ -116,14 +116,7 @@ int main(int argc, char** argv) {
     std::filesystem::create_directories(analysis_dir, ec_mk);
     std::filesystem::create_directories(debug_dir, ec_mk);
     std::string pairs_dir = analysis_dir + "/pairs";
-    
-    // Aggregated minimal pairs bundle (one file per SPICE library)
-    std::vector<std::pair<std::string,std::string>> bundle_cells; // (cell, json-body)
-    auto libBase = std::filesystem::path(rc.library_spice).filename().string();
-    auto dot = libBase.find_last_of('.'); if (dot != std::string::npos) libBase = libBase.substr(0, dot);
-    std::string bundle_dir = (rc.out_dir.empty()? std::string("out") : rc.out_dir) + std::string("/") + libBase;
-    std::string bundle_path = bundle_dir + "/pairs.bundle.json";
-    std::filesystem::create_directories(bundle_dir, ec_mk);
+    std::filesystem::create_directories(pairs_dir, ec_mk);
 
     auto json_escape = [](const std::string& s){ std::string o; o.reserve(s.size()+2); for(char c: s){ if(c=='\\'||c=='"') o.push_back('\\'), o.push_back(c); else if(c=='\n') { o += "\\n"; } else o.push_back(c);} return o; };
 
@@ -151,22 +144,12 @@ int main(int argc, char** argv) {
                     const auto& g = mout.groups[gi];
                     dj << "    {\"level\": " << g.level << ", \"pairs\": [\n";
                     for (size_t pi=0; pi<g.pairs.size(); ++pi) {
-                    const auto& p = g.pairs[pi];
-                    auto findT = [&](const std::string& id)->const Transistor*{ for (const auto& t : nl.devices) if (t.id==id) return &t; return nullptr; };
-                    const Transistor* tp = (!p.p.id.empty() ? findT(p.p.id) : nullptr);
-                    const Transistor* tn = (!p.n.id.empty() ? findT(p.n.id) : nullptr);
-                    dj << "        {\"pmos\":{\"id\":\"" << (tp? json_escape(tp->id): std::string(""))
-                       << "\",\"g\":\"" << (tp? json_escape(tp->g): std::string(""))
-                       << "\",\"s\":\"" << (tp? json_escape(tp->s): std::string(""))
-                       << "\",\"d\":\"" << (tp? json_escape(tp->d): std::string("")) << "\"},"
-                       << "\"nmos\":{\"id\":\"" << (tn? json_escape(tn->id): std::string(""))
-                       << "\",\"g\":\"" << (tn? json_escape(tn->g): std::string(""))
-                       << "\",\"s\":\"" << (tn? json_escape(tn->s): std::string(""))
-                       << "\",\"d\":\"" << (tn? json_escape(tn->d): std::string("")) << "\"}}";
-                    if (pi+1 != g.pairs.size()) dj << ",";
-                    dj << "\n";
-                }
-                
+                        const auto& p = g.pairs[pi];
+                        dj << "      {\"pmos\":{\"id\":\"" << json_escape(p.pmos.id) << "\",\"g\":\"" << json_escape(p.pmos.g) << "\",\"s\":\"" << json_escape(p.pmos.s) << "\",\"d\":\"" << json_escape(p.pmos.d) << "\"},"
+                           << "\"nmos\":{\"id\":\"" << json_escape(p.nmos.id) << "\",\"g\":\"" << json_escape(p.nmos.g) << "\",\"s\":\"" << json_escape(p.nmos.s) << "\",\"d\":\"" << json_escape(p.nmos.d) << "\"}}";
+                        if (pi+1 != g.pairs.size()) dj << ",";
+                        dj << "\n";
+                    }
                     dj << "    ]}";
                     if (gi+1 != mout.groups.size()) dj << ",";
                     dj << "\n";
@@ -174,45 +157,15 @@ int main(int argc, char** argv) {
                 dj << "  ],\n  \"discrete\": [\n";
                 for (size_t di=0; di<mout.discrete.size(); ++di) {
                     const auto& m = mout.discrete[di];
-                    const Transistor* tptr = nullptr; for (const auto& t : nl.devices) if (t.id == m.id) { tptr = &t; break; }
-                    if (!tptr) continue;
-                    dj << "    {\"type\":\"" << (tptr->type==TransType::PMOS?"PMOS":"NMOS")
-                       << "\",\"id\":\"" << json_escape(tptr->id)
-                       << "\",\"g\":\"" << json_escape(tptr->g)
-                       << "\",\"s\":\"" << json_escape(tptr->s)
-                       << "\",\"d\":\"" << json_escape(tptr->d) << "\"}";
+                    dj << "    {\"type\":\"" << (m.type==TransType::PMOS?"PMOS":"NMOS") << "\",\"id\":\"" << json_escape(m.id) << "\",\"g\":\"" << json_escape(m.g) << "\",\"s\":\"" << json_escape(m.s) << "\",\"d\":\"" << json_escape(m.d) << "\"}";
                     if (di+1 != mout.discrete.size()) dj << ",";
                     dj << "\n";
                 }
-                
                 dj << "  ]\n}\n";
-            }
-            // Add id-only entry for pairs bundle
-            {
-                std::ostringstream ss;
-                ss << "\"" << json_escape(cell) << "\": {\n  \"groups\": [\n";
-                for (size_t gi=0; gi<mout.groups.size(); ++gi) {
-                    const auto& g = mout.groups[gi];
-                    ss << "    {\"level\": " << g.level << ", \"pairs\": [";
-                    for (size_t pi=0; pi<g.pairs.size(); ++pi) {
-                        const auto& p = g.pairs[pi];
-                        ss << "[\"" << json_escape(p.p.id) << "\",\"" << json_escape(p.n.id) << "\"]";
-                        if (pi+1 != g.pairs.size()) ss << ",";
-                    }
-                    ss << "]}";
-                    if (gi+1 != mout.groups.size()) ss << ",\n"; else ss << "\n";
-                }
-                ss << "  ],\n  \"discrete\": [";
-                for (size_t di=0; di<mout.discrete.size(); ++di) {
-                    ss << "\"" << json_escape(mout.discrete[di].id) << "\"";
-                    if (di+1 != mout.discrete.size()) ss << ",";
-                }
-                ss << "]\n}";
-                bundle_cells.emplace_back(cell, ss.str());
             }
 
             // convert to legacy for downstream
-            MatchResult mr = pairs_to_match_result(mout, nl);
+            MatchResult mr = pairs_to_match_result(mout);
             std::string mpath = match_path_for(cell);
             write_match_json(mpath, mr);
         } else if (do_place || do_route) {
@@ -231,7 +184,6 @@ int main(int argc, char** argv) {
                 read_match_json(minpath, mr);
             }
             std::unique_ptr<IPlacer> placer = rc.use_rl ? make_rl_adapter_placer("python/rl_placer") : make_heuristic_placer();
-    std::cout << "Bundle cells collected: " << bundle_cells.size() << std::endl;
             pl = placer->place(mr, tr, nl);
             std::string ppath = place_path_for(cell);
             write_placement_json(ppath, pl);
@@ -255,17 +207,6 @@ int main(int argc, char** argv) {
 
     if (cells.empty()) { std::cerr << "No cells specified to run.\n"; return 10; }
     for (const auto& cell : cells) run_cell(cell);
-    // Write aggregated pairs bundle
-    if (do_match) {
-        std::ofstream bo(bundle_path);
-        auto now = std::time(nullptr);
-        bo << "{\n  \"schema\": \"pairs_bundle/v1\",\n  \"bundle_id\": \"" << libBase << "\",\n  \"netlist\": \"" << rc.library_spice << "\",\n  \"generated_at\": " << now << ",\n  \"cells\": {\n";
-        for (size_t i=0; i<bundle_cells.size(); ++i) {
-            bo << "    " << bundle_cells[i].second; if (i+1 != bundle_cells.size()) bo << ","; bo << "\n";
-        }
-        bo << "  }\n}\n";
-        std::cout << "Pairs bundle: " << bundle_path << std::endl;
-    }
 
     // Print match summary if we did match
     if (do_match && !report_rows.empty()) {
@@ -297,7 +238,4 @@ int main(int argc, char** argv) {
 
     return 0;
 }
-
-
-
 

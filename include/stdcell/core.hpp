@@ -28,6 +28,9 @@ struct TechRules {
     Dir preferred_m0_dir = Dir::H;
     Dir preferred_m1_dir = Dir::V;
     double default_w_per_fin_um = 0.0; // optional mapping from width to nfin
+    // CSV aliases for rails from config (used by matcher for rail-name detection)
+    std::string vdd_aliases_csv;
+    std::string vss_aliases_csv;
 };
 
 struct Transistor {
@@ -47,7 +50,8 @@ struct Transistor {
 
 struct Netlist {
     std::string cell_name;
-    std::vector<std::string> rails;   // e.g. VDD,VSS
+    std::vector<std::string> vdd_nets;  // e.g. VDD,VDDG,VDDR
+    std::vector<std::string> vss_nets;  // e.g. VSS,GND,VSSD
     std::vector<std::string> pins;    // e.g. A,Y
     std::vector<Transistor> devices;
 };
@@ -109,7 +113,12 @@ struct RunConfig {
     std::string place_in_dir;
     std::string place_out_dir;
     std::string route_out_dir;
+    // Optional single-file pairs bundle I/O
+    std::string pairs_bundle_in;
+    std::string pairs_bundle_out;
     std::map<std::string, std::string> overrides;
 };
 
 } // namespace stdcell
+
+

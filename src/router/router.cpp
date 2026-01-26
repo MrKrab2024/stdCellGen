@@ -1,5 +1,4 @@
-#include "stdcell/router.hpp"
-
+﻿#include "stdcell/router.hpp"
 #include <algorithm>
 
 namespace stdcell {
@@ -7,15 +6,23 @@ namespace stdcell {
 Routed route_simple(const MatchResult& match, Placement placement, const TechRules& tr, const Netlist& nl) {
     Routed r; r.placement = placement;
 
-    // Create VDD/VSS rails on M0 (horizontal only)
+    // Create rails on M0 (horizontal)
     const double y_vss = tr.rail_width_um * 0.5;
     const double y_vdd = r.placement.cell_h_um - tr.rail_width_um * 0.5;
-    WireSegment vss; vss.net = "VSS"; vss.layer = "M0"; vss.x1 = 0; vss.x2 = r.placement.cell_w_um; vss.y1 = vss.y2 = y_vss; r.wires.push_back(vss);
-    WireSegment vdd; vdd.net = "VDD"; vdd.layer = "M0"; vdd.x1 = 0; vdd.x2 = r.placement.cell_w_um; vdd.y1 = vdd.y2 = y_vdd; r.wires.push_back(vdd);
+    // Bottom rails for all VSS-family nets
+    for (const auto& rn : nl.vss_nets) {
+        WireSegment v; v.net = rn; v.layer = "M0"; v.x1 = 0; v.x2 = r.placement.cell_w_um; v.y1 = v.y2 = y_vss; r.wires.push_back(v);
+    }
+    // Top rails for all VDD-family nets
+    for (const auto& rn : nl.vdd_nets) {
+        WireSegment v; v.net = rn; v.layer = "M0"; v.x1 = 0; v.x2 = r.placement.cell_w_um; v.y1 = v.y2 = y_vdd; r.wires.push_back(v);
+    }
 
-    // For demo, drop simple vertical M1 stubs from each pin to near cell middle
+    // Vertical M1 stubs from each non-rail pin
     for (const auto& p : r.placement.pins) {
-        if (p.name == "VDD" || p.name == "VSS" || p.name == "GND") continue;
+        bool is_rail = (std::find(nl.vdd_nets.begin(), nl.vdd_nets.end(), p.name) != nl.vdd_nets.end() ||
+                        std::find(nl.vss_nets.begin(), nl.vss_nets.end(), p.name) != nl.vss_nets.end());
+        if (is_rail) continue;
         WireSegment s; s.net = p.name; s.layer = "M1"; s.x1 = s.x2 = p.x; s.y1 = 0; s.y2 = r.placement.cell_h_um; r.wires.push_back(s);
     }
 

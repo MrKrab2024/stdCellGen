@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "stdcell/core.hpp"
 #include <string>
@@ -14,7 +14,7 @@ Netlist parse_cell_spec(const std::string& path);
 
 // Parse SPICE library and extract one subckt as Netlist
 Netlist parse_spice_subckt(const std::string& lib_path, const std::string& subckt_name,
-                           const std::vector<std::string>& rails_hint);
+                           const std::vector<std::string>& vdd_hint, const std::vector<std::string>& vss_hint);
 
 // Parse unified run config (-config)
 RunConfig parse_run_config(const std::string& path);

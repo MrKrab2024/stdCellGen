@@ -1,4 +1,4 @@
-#include "stdcell/placer.hpp"
+﻿#include "stdcell/placer.hpp"
 #include "stdcell/matcher.hpp"
 
 #include <algorithm>
@@ -60,11 +60,11 @@ struct HeuristicPlacer : IPlacer {
             pl.pins.push_back(p);
         }
         // Also add rails as pins for reference
-        for (const auto& rname : nl.rails) {
-            Rect p; p.name = rname; p.x = pl.cell_w_um * 0.5; p.w = pl.cell_w_um; p.h = tr.rail_width_um;
-            if (rname == "VSS" || rname == "GND") { p.y = 0; }
-            else { p.y = pl.cell_h_um - tr.rail_width_um; }
-            pl.pins.push_back(p);
+        // VSS rails at bottom
+        for (const auto& rname : nl.vss_nets) {
+            Rect p; p.name = rname; p.x = pl.cell_w_um * 0.5; p.w = pl.cell_w_um; p.h = tr.rail_width_um; p.y = 0; pl.pins.push_back(p);
+        }
+        for (const auto& rname : nl.vdd_nets) {
         }
         return pl;
     }
@@ -150,3 +150,6 @@ std::unique_ptr<IPlacer> make_rl_adapter_placer(const std::string& python_module
 }
 
 } // namespace stdcell
+
+
+
